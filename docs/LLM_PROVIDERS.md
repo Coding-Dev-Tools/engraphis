@@ -27,6 +27,7 @@ through MCP. Codex and Cohere Command are distinct products and use different se
 - [Ollama](#ollama)
 - [Cohere Command](#cohere-command)
 - [Other OpenAI-compatible endpoints](#other-openai-compatible-endpoints)
+- [NVIDIA NIM embeddings (optional)](#nvidia-nim-embeddings-optional)
 - [Codex subscription](#codex-subscription)
 - [Command Code](#command-code)
 
@@ -211,6 +212,30 @@ The custom client sends a model, system and user messages, plus optional tempera
 limits. Endpoints that implement another protocol, such as Anthropic Messages, need a matching
 native mode or adapter. If a test fails, confirm the base URL, model, credential, required headers,
 and request and response shapes.
+
+## NVIDIA NIM embeddings (optional)
+
+Engraphis keeps embeddings local by default (CPU, or opt-in CUDA via `ENGRAPHIS_EMBED_DEVICE=auto`).
+To opt into NVIDIA NIM's OpenAI-compatible `/v1/embeddings` endpoint instead of local embeddings,
+configure the `nvidia-nim` preset (separate from `ENGRAPHIS_LLM_PROVIDER`, which controls optional
+chat/extraction LLMs):
+
+```dotenv
+ENGRAPHIS_EMBED_PROVIDER=nvidia-nim
+ENGRAPHIS_EMBED_MODEL=nvidia/nv-embedqa-e5-v5
+ENGRAPHIS_EMBED_REVISION=nim-nv-embedqa-e5-v5-v1
+NVIDIA_API_KEY=<nvidia-api-key>
+# Optional for a self-hosted NVIDIA NIM microservice:
+# ENGRAPHIS_EMBED_BASE_URL=http://127.0.0.1:8000/v1
+```
+
+Engraphis automatically passes `input_type="passage"` when storing memories and `input_type="query"`
+during recall. Non-loopback endpoints require HTTPS and an API key (`NVIDIA_API_KEY` or
+`ENGRAPHIS_EMBED_API_KEY`). Remote NIM calls transmit non-secret memory texts and recall queries to
+the configured endpoint; credential payloads are rejected before embedding and memories marked
+`sensitivity="secret"` are never sent to remote embedding APIs. See
+[Configuration reference](CONFIGURATION.md#optional-nvidia-cuda-and-nvidia-nim-embeddings) for
+full details, including local CUDA device selection and vector-space versioning.
 
 ## Codex subscription
 

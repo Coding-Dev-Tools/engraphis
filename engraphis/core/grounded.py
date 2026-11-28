@@ -39,7 +39,13 @@ from typing import Optional
 import numpy as np
 
 from engraphis.core.context import RegexTokenCounter, _starts_with_title
-from engraphis.core.interfaces import LLM, embedder_capabilities
+from engraphis.core.interfaces import (
+    LLM,
+    embed_texts,
+    embedder_capabilities,
+    is_remote_embedder,
+    is_secret_memory,
+)
 from engraphis.core.poisoning import detect_payload_signals, prompt_eligible
 from engraphis.core.recall import RecallResult
 from engraphis.core.textutil import jaccard, tokenize
@@ -225,7 +231,13 @@ def _lexical_support(query_tokens: set[str], content_tokens: set[str]) -> float:
     )
 
 
-def support_scores(query: str, contents: list[str], embedder) -> list[float]:
+def support_scores(
+    query: str,
+    contents: list[str],
+    embedder,
+    *,
+    secret_mask: Optional[list[bool]] = None,
+) -> list[float]:
     """Absolute per-source support from declared semantic and lexical evidence.
 
     Both arms are query-independent in scale — unlike the recall score, which is min-max
@@ -238,18 +250,38 @@ def support_scores(query: str, contents: list[str], embedder) -> list[float]:
         return []
     q_tokens = tokenize(query) - _QUERY_FRAMING_TERMS
     semantic_scores = [0.0] * len(contents)
-    if embedder_capabilities(embedder)["semantic_support"]:
-        texts = [_filtered_text(query)] + [_filtered_text(c) for c in contents]
+    blocked_indices = (
+        {
+            idx
+            for idx, flagged in enumerate(secret_mask)
+            if flagged and idx < len(contents)
+        }
+        if is_remote_embedder(embedder) and secret_mask is not None
+        else set()
+    )
+    embeddable_indices = [idx for idx in range(len(contents)) if idx not in blocked_indices]
+    if embedder_capabilities(embedder)["semantic_support"] and embeddable_indices:
+        filtered_query = _filtered_text(query)
+        filtered_contents = [_filtered_text(contents[idx]) for idx in embeddable_indices]
         try:
-            vectors = embedder.embed(texts)
-            if len(vectors) != len(texts):
-                raise ValueError("semantic embedder returned an unexpected vector count")
+            if getattr(embedder, "supports_input_type", False):
+                query_vectors = embed_texts(embedder, [filtered_query], input_type="query")
+                content_vectors = embed_texts(embedder, filtered_contents, input_type="passage")
+                if len(query_vectors) != 1 or len(content_vectors) != len(filtered_contents):
+                    raise ValueError("semantic embedder returned an unexpected vector count")
+                vectors = [query_vectors[0], *content_vectors]
+            else:
+                texts = [filtered_query] + filtered_contents
+                vectors = embedder.embed(texts)
+                if len(vectors) != len(texts):
+                    raise ValueError("semantic embedder returned an unexpected vector count")
             query_vector = np.asarray(vectors[0], dtype=float)
             if query_vector.ndim != 1 or not np.isfinite(query_vector).all():
                 raise ValueError("semantic embedder returned an invalid query vector")
             query_norm = float(np.linalg.norm(query_vector))
             normalized_query_vector = query_vector / (query_norm or 1.0)
-            for index, raw_vector in enumerate(vectors[1:]):
+            for pos, raw_vector in enumerate(vectors[1:]):
+                index = embeddable_indices[pos]
                 content_vector = np.asarray(raw_vector, dtype=float)
                 if (
                     content_vector.shape != normalized_query_vector.shape
@@ -410,6 +442,7 @@ def build_grounded_answer(query: str, result: RecallResult, embedder, *,
     source_metadata = getattr(result, "source_metadata", {})
     chunks = []
     eligible_packed = []
+    secret_mask: list[bool] = []
     for packed in result.packed_chunks:
         raw = raw_by_id.get(str(packed.id))
         if raw is None or not packed.excerpt:
@@ -419,8 +452,9 @@ def build_grounded_answer(query: str, result: RecallResult, embedder, *,
             continue
         chunks.append({**raw, "content": packed.excerpt, "attribution": packed.attribution})
         eligible_packed.append(packed)
+        secret_mask.append(is_secret_memory(raw.get("sensitivity"), metadata))
     contents = [str(c.get("content", "")) for c in chunks]
-    per = support_scores(query, contents, embedder)
+    per = support_scores(query, contents, embedder, secret_mask=secret_mask)
     support = max(per) if per else 0.0
     count_answer_tokens = result.token_counter or RegexTokenCounter()
     budget_tokens = result.usage.budget_tokens if result.usage is not None else 0

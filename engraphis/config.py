@@ -744,6 +744,51 @@ def _parse_llm_provider(value: str) -> str:
     return (value or "").strip().lower() or "openai"
 
 
+_EMBED_PROVIDERS = frozenset({"", "local", "sentence-transformers", "nvidia-nim", "api", "openai-compatible"})
+_EMBED_DEVICE_RE = re.compile(r"^(?:auto|cpu|cuda(?::\d+)?)$")
+
+
+def _parse_embed_provider(value: str) -> str:
+    """Return a supported embedding provider selector, defaulting safely to local."""
+    normalized = (value or "").strip().lower()
+    if normalized in _EMBED_PROVIDERS:
+        return normalized
+    _logger.warning(
+        "ENGRAPHIS_EMBED_PROVIDER contains an unsupported value; "
+        "using local embeddings (supported: local, sentence-transformers, nvidia-nim, api)"
+    )
+    return ""
+
+
+def _parse_embed_device(value: str) -> str:
+    """Return a supported local embedding device selector, defaulting safely to unset."""
+    normalized = (value or "").strip().lower()
+    if not normalized:
+        return ""
+    if _EMBED_DEVICE_RE.fullmatch(normalized):
+        return normalized
+    _logger.warning(
+        "ENGRAPHIS_EMBED_DEVICE contains an unsupported value; "
+        "using default local device (supported: auto, cpu, cuda, cuda:<index>)"
+    )
+    return ""
+
+
+def _default_embed_model() -> str:
+    """Preserve the local MiniLM default unless the operator opted into NVIDIA NIM."""
+    provider = _parse_embed_provider(_env("ENGRAPHIS_EMBED_PROVIDER", ""))
+    if "ENGRAPHIS_EMBED_MODEL" in os.environ:
+        configured = _env("ENGRAPHIS_EMBED_MODEL", "")
+        if configured.strip():
+            return configured
+        if provider == "nvidia-nim":
+            return "nvidia/nv-embedqa-e5-v5"
+        return configured
+    if provider == "nvidia-nim":
+        return "nvidia/nv-embedqa-e5-v5"
+    return "sentence-transformers/all-MiniLM-L6-v2"
+
+
 #: Accepted ``ENGRAPHIS_LLM_EFFORT`` levels (Anthropic ``output_config.effort``).
 LLM_EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 
@@ -947,12 +992,21 @@ class Settings:
         default_factory=lambda: _env("ENGRAPHIS_SQLITE_DURABILITY", "durable").lower()
     )
 
-    embed_model: str = field(
-        default_factory=lambda: _env(
-            "ENGRAPHIS_EMBED_MODEL",
-            "sentence-transformers/all-MiniLM-L6-v2",
+    embed_provider: str = field(
+        default_factory=lambda: _parse_embed_provider(_env("ENGRAPHIS_EMBED_PROVIDER", ""))
+    )
+    embed_device: str = field(
+        default_factory=lambda: _parse_embed_device(_env("ENGRAPHIS_EMBED_DEVICE", ""))
+    )
+    embed_base_url: str = field(
+        default_factory=lambda: (
+            _env("ENGRAPHIS_EMBED_BASE_URL", "") or _env("NVIDIA_NIM_BASE_URL", "")
         )
     )
+    embed_api_key: str = field(
+        default_factory=lambda: _env("ENGRAPHIS_EMBED_API_KEY", "")
+    )
+    embed_model: str = field(default_factory=_default_embed_model)
     # Optional immutable Hugging Face commit for ENGRAPHIS_EMBED_MODEL. Empty preserves
     # normal tag/branch resolution unless strict model provenance is enabled below.
     embed_revision: str = field(default_factory=lambda: _env("ENGRAPHIS_EMBED_REVISION", ""))
@@ -1151,6 +1205,20 @@ class Settings:
                     "Configured vector backend selector is not recognized and "
                     "require_exact_backends=True prevents silent fallback to numpy "
                     "(valid: numpy, sqlite-vec, auto)"
+                )
+            raw_embed_provider = _env("ENGRAPHIS_EMBED_PROVIDER", "").strip().lower()
+            if raw_embed_provider not in _EMBED_PROVIDERS:
+                raise ValueError(
+                    "Configured ENGRAPHIS_EMBED_PROVIDER is not recognized and "
+                    "require_exact_backends=True prevents silent fallback "
+                    "(valid: local, sentence-transformers, nvidia-nim, api, openai-compatible)"
+                )
+            raw_embed_device = _env("ENGRAPHIS_EMBED_DEVICE", "").strip().lower()
+            if raw_embed_device and not _EMBED_DEVICE_RE.fullmatch(raw_embed_device):
+                raise ValueError(
+                    "Configured ENGRAPHIS_EMBED_DEVICE is not recognized and "
+                    "require_exact_backends=True prevents silent fallback "
+                    "(valid: auto, cpu, cuda, cuda:<index>)"
                 )
 
 

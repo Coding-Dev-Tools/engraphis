@@ -69,6 +69,9 @@ from engraphis.core.interfaces import (
     Scope,
     SearchFilter,
     SyncTransport,
+    embed_texts,
+    is_remote_embedder,
+    is_secret_memory,
     embedding_space_fingerprint,
     normalize_closure_observations,
     normalize_modified_hlc,
@@ -2160,10 +2163,15 @@ class SyncEngine:
             or self.store.embedding_space_ready(self.embedding_space)
             or rebuild_target == self.embedding_space
         )
-        if embedder is not None and vector_writes_ready and not quarantined:
+        skip_remote_secret = (
+            embedder is not None
+            and is_remote_embedder(embedder)
+            and is_secret_memory(rec.sensitivity, rec.metadata)
+        )
+        if embedder is not None and vector_writes_ready and not quarantined and not skip_remote_secret:
             try:
                 text = f"{rec.title}\n{rec.content}" if rec.title else rec.content
-                rec.embedding = embedder.embed([text])[0]
+                rec.embedding = embed_texts(embedder, [text], input_type="passage")[0]
                 rec.metadata = {
                     **(rec.metadata or {}),
                     "embed_model": self.embedding_space,

@@ -62,7 +62,7 @@ from engraphis.core.source_paths import (
 from engraphis.core.savings import annotate_usage, normalize_release_version
 from engraphis.core.interfaces import (
     Edge, FactSpec, GraphLayer, MemoryRecord, MemoryType, Node, Scope, SearchFilter,
-    embedder_capabilities, embedding_space_fingerprint,
+    embed_texts, embedder_capabilities, embedding_space_fingerprint, is_secret_memory,
     vector_index_requires_sync,
     vector_index_shares_store_transaction,
 )
@@ -1617,6 +1617,7 @@ class MemoryService:
     @classmethod
     def create(cls, db_path: str = ":memory:", *, embed_model: Optional[str] = None,
                embed_revision: Optional[str] = None,
+               embed_device: Optional[str] = None,
                require_immutable_models: bool = False,
                embed_dim: int = 384, vector_backend: str = "numpy",
                rerank_model: Optional[str] = None,
@@ -1668,6 +1669,7 @@ class MemoryService:
         connect = connector_from_env()
         engine = MemoryEngine.create(
             database_path, embed_model=embed_model, embed_revision=embed_revision,
+            embed_device=embed_device,
             require_immutable_models=require_immutable_models,
             embed_dim=embed_dim,
             vector_backend=vector_backend, rerank_model=rerank_model,
@@ -7302,7 +7304,7 @@ class MemoryService:
         prepared_vector = None
         prepared_space = self.engine.embedding_space
         if (title is not None and title != existing.title
-                and existing.sensitivity != "secret"
+                and not is_secret_memory(existing.sensitivity, existing.metadata)
                 and inspection_eligible(existing.provenance, existing.metadata)):
             _reject_secret_capture((("content", existing.content),))
             if not _is_memory_database_path(self.store.path) and (
@@ -7311,7 +7313,10 @@ class MemoryService:
                 raise ValidationError("the configured embedding space is not active")
             text = f"{title}\n{existing.content}" if title else existing.content
             try:
-                prepared_vector = np.asarray(self.engine.embedder.embed([text]), dtype=np.float32)
+                prepared_vector = np.asarray(
+                    embed_texts(self.engine.embedder, [text], input_type="passage"),
+                    dtype=np.float32,
+                )
             except (TypeError, ValueError, OverflowError) as exc:
                 raise ValidationError("embedder returned an invalid vector") from exc
             expected_dim = int(getattr(self.engine.embedder, "dim", 0) or 0)
@@ -7439,7 +7444,7 @@ class MemoryService:
                 # local governance only. A metadata edit must not turn either into a
                 # semantic candidate or send its payload to an embedder.
                 if (
-                    existing.sensitivity == "secret"
+                    is_secret_memory(existing.sensitivity, existing.metadata)
                     or not inspection_eligible(existing.provenance, existing.metadata)
                 ):
                     self.store.conn.execute("DELETE FROM mem_vectors WHERE id=?", (mid,))

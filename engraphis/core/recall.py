@@ -54,6 +54,8 @@ from engraphis.core.interfaces import (
     RetrievalPlan,
     RetrievalPolicy,
     SearchFilter,
+    embed_texts,
+    is_secret_memory,
     embedding_space_fingerprint,
 )
 from engraphis.core.retrieval_policy import (
@@ -463,7 +465,7 @@ class RecallEngine:
         mark_phase("preparation")
         if embedded_texts:
             try:
-                embedded = self.embedder.embed(embedded_texts)
+                embedded = embed_texts(self.embedder, embedded_texts, input_type="query")
                 if len(embedded) != len(embedded_texts):
                     raise ValueError("semantic embedder returned an unexpected vector count")
                 embedded_iter = iter(embedded)
@@ -2549,6 +2551,8 @@ def _source_safety_metadata(record: MemoryRecord) -> dict:
         out["provenance"] = trust
     if str(quarantine.get("state", "")).casefold() == "quarantined":
         out["quarantine"] = {"state": "quarantined"}
+    if is_secret_memory(record.sensitivity, metadata):
+        out["sensitivity"] = "secret"
     return out
 
 

@@ -664,6 +664,45 @@ class Embedder(Protocol):
     def embed(self, texts: list[str], *, kind: Literal["text", "code"] = "text") -> np.ndarray: ...
 
 
+def embed_texts(
+    embedder: Any,
+    texts: list[str],
+    *,
+    kind: Literal["text", "code"] = "text",
+    input_type: Literal["query", "passage"] = "passage",
+) -> np.ndarray:
+    """Invoke ``embedder.embed`` while forwarding ``input_type`` only when supported.
+
+    Asymmetric retrieval APIs such as NVIDIA NIM distinguish search queries
+    (``input_type="query"``) from stored passages (``input_type="passage"``).
+    Keeping that opt-in behind ``supports_input_type`` preserves compatibility
+    with existing local, deterministic, and custom ``Embedder`` implementations.
+    """
+    if getattr(embedder, "supports_input_type", False):
+        return embedder.embed(texts, kind=kind, input_type=input_type)
+    if kind == "text":
+        return embedder.embed(texts)
+    return embedder.embed(texts, kind=kind)
+
+
+def is_remote_embedder(embedder: Any) -> bool:
+    """Return True when the embedder transmits text to a non-local endpoint."""
+    return bool(getattr(embedder, "is_remote", False))
+
+
+def is_secret_memory(
+    sensitivity: Any = None,
+    metadata: Any = None,
+) -> bool:
+    """Return True when a record or its metadata classifies the memory as secret."""
+    if str(sensitivity or "").strip().casefold() == "secret":
+        return True
+    if isinstance(metadata, dict):
+        if str(metadata.get("sensitivity") or "").strip().casefold() == "secret":
+            return True
+    return False
+
+
 def embedding_space_fingerprint(embedder: Any) -> str:
     """Return the durable identity of one persisted embedding vector space.
 

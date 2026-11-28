@@ -24,11 +24,107 @@ from typing import Any, Literal, Optional
 import numpy as np
 
 from engraphis.backends.embedder_deterministic import DeterministicEmbedder
-from engraphis.backends.model_source import is_local_model_source, validate_model_source
+from engraphis.backends.model_source import (
+    immutable_models_required,
+    is_local_model_source,
+    validate_model_source,
+)
 from engraphis.core.interfaces import Embedder
 
 
 LOCAL_MODEL_PREFIX = "local:"
+NVIDIA_NIM_PREFIX = "nvidia-nim"
+API_MODEL_PREFIXES = ("api:", "openai-compatible:")
+
+_CUDA_DEVICE_RE = re.compile(r"^cuda(?::(\d+))?$")
+
+
+def _cuda_available(device_index: Optional[int] = None) -> bool:
+    """Return True when PyTorch is installed and reports a usable CUDA device."""
+    try:
+        import torch  # pyright: ignore[reportMissingImports]  # lazy: optional dependency
+    except Exception:
+        return False
+    cuda = getattr(torch, "cuda", None)
+    is_available = getattr(cuda, "is_available", None)
+    if not callable(is_available):
+        return False
+    try:
+        if not bool(is_available()):
+            return False
+        if device_index is not None:
+            device_count = getattr(cuda, "device_count", None)
+            if callable(device_count):
+                count = int(device_count())  # type: ignore[arg-type]
+                if not 0 <= device_index < count:
+                    return False
+    except Exception:
+        return False
+    return True
+
+
+def resolve_embed_device(
+    device: Optional[str] = None,
+    *,
+    require_exact: bool = False,
+) -> Optional[str]:
+    """Resolve an optional local embedding device selector (``auto``/``cuda``/``cpu``).
+
+    Returns ``None`` when neither *device* nor ``ENGRAPHIS_EMBED_DEVICE`` is set so
+    the default local CPU/offline loader behavior remains untouched.
+    """
+    raw = (
+        os.environ.get("ENGRAPHIS_EMBED_DEVICE", "").strip()
+        if device is None
+        else str(device).strip()
+    )
+    if not raw:
+        return None
+    normalized = raw.lower()
+    if normalized == "cpu":
+        return "cpu"
+    if normalized == "auto":
+        return "cuda" if _cuda_available() else "cpu"
+    match = _CUDA_DEVICE_RE.fullmatch(normalized)
+    if match is not None:
+        index = int(match.group(1)) if match.group(1) is not None else None
+        if _cuda_available(index):
+            return normalized
+        if require_exact:
+            raise RuntimeError(
+                f"CUDA embedding device '{normalized}' was requested, but PyTorch reports "
+                "no compatible CUDA GPU available; install CUDA-enabled PyTorch or set "
+                "ENGRAPHIS_EMBED_DEVICE=cpu or auto"
+            )
+        logging.getLogger("engraphis").warning(
+            "CUDA embedding device '%s' requested but no compatible CUDA GPU is "
+            "available; falling back to CPU",
+            normalized,
+        )
+        return "cpu"
+    if require_exact:
+        raise ValueError(
+            "ENGRAPHIS_EMBED_DEVICE must be one of: auto, cpu, cuda, or cuda:<index>"
+        )
+    logging.getLogger("engraphis").warning(
+        "ENGRAPHIS_EMBED_DEVICE contains an unsupported value; using default local device "
+        "(supported: auto, cpu, cuda, cuda:<index>)"
+    )
+    return None
+
+
+def _configured_api_dim() -> Optional[int]:
+    """Return an explicit positive ENGRAPHIS_EMBED_DIM override, or None for auto-detect."""
+    raw = os.environ.get("ENGRAPHIS_EMBED_DIM", "").strip()
+    if not raw or raw == "0":
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError("ENGRAPHIS_EMBED_DIM must be a positive integer or 0") from None
+    if value <= 0:
+        raise ValueError("ENGRAPHIS_EMBED_DIM must be a positive integer or 0")
+    return value
 
 
 _IMMUTABLE_COMMIT = re.compile(r"[0-9a-f]{40}\Z")
@@ -178,6 +274,7 @@ class SentenceTransformerEmbedder:
         revision: Optional[str] = None,
         local_files_only: bool = False,
         require_immutable_models: Optional[bool] = None,
+        device: Optional[str] = None,
     ) -> None:
         validation_source = (
             f"{LOCAL_MODEL_PREFIX}{model_name}"
@@ -189,6 +286,9 @@ class SentenceTransformerEmbedder:
             revision,
             require_immutable_models=require_immutable_models,
             loader="sentence-transformers model",
+        )
+        resolved_device = (
+            resolve_embed_device(device) if device is not None else None
         )
         local_source = is_local_model_source(model_name)
         if not revision and not local_source and model_name in _DEFAULT_MINILM_NAMES:
@@ -203,12 +303,15 @@ class SentenceTransformerEmbedder:
             # local mode.  It still supports both a local model directory and an
             # already-populated sentence-transformers cache.
             kwargs["local_files_only"] = True
+        if resolved_device is not None:
+            kwargs["device"] = resolved_device
         # Keep declared model provenance beside the loaded object.  Benchmark
         # artifacts must be able to distinguish a pinned model from a mutable
         # fallback without inspecting implementation-specific internals.
         self.model_name = model_name
         self.revision = revision
         self.local_files_only = local_files_only
+        self.device = resolved_device
         self.model = SentenceTransformer(model_name, **kwargs)
         local_after = (
             _local_artifact_version(
@@ -282,6 +385,31 @@ class SentenceTransformerEmbedder:
 LAST_EMBEDDER_ERROR = ""
 
 
+def _select_api_provider(
+    raw_model_name: str,
+    explicit_provider: Optional[str],
+) -> tuple[str, str]:
+    """Return ``(provider, model_name)`` when an opt-in API/NIM preset is selected."""
+    normalized_provider = (
+        str(explicit_provider).strip().lower()
+        if explicit_provider is not None
+        else ""
+    )
+    if raw_model_name == NVIDIA_NIM_PREFIX:
+        return "nvidia-nim", ""
+    if raw_model_name.startswith(f"{NVIDIA_NIM_PREFIX}:"):
+        return "nvidia-nim", raw_model_name[len(NVIDIA_NIM_PREFIX) + 1:].strip()
+    for prefix in API_MODEL_PREFIXES:
+        if raw_model_name.startswith(prefix):
+            return "api", raw_model_name[len(prefix):].strip()
+    if normalized_provider in {"nvidia-nim", "api", "openai-compatible"}:
+        return ("nvidia-nim" if normalized_provider == "nvidia-nim" else "api"), raw_model_name
+    env_provider = os.environ.get("ENGRAPHIS_EMBED_PROVIDER", "").strip().lower()
+    if raw_model_name and env_provider in {"nvidia-nim", "api", "openai-compatible"}:
+        return ("nvidia-nim" if env_provider == "nvidia-nim" else "api"), raw_model_name
+    return "", raw_model_name
+
+
 def get_embedder(
     model_name: Optional[str] = None,
     dim: int = 256,
@@ -289,6 +417,10 @@ def get_embedder(
     revision: Optional[str] = None,
     require_immutable_models: Optional[bool] = None,
     require_exact: bool = False,
+    device: Optional[str] = None,
+    provider: Optional[str] = None,
+    base_url: Optional[str] = None,
+    api_key: Optional[str] = None,
 ) -> Embedder:
     """Return a semantic model when available, else explicit lexical degradation.
 
@@ -297,19 +429,89 @@ def get_embedder(
     is deliberately opt-in because a regular model identifier retains the existing
     behavior for operators who want sentence-transformers to resolve it normally.
 
+    Opt into NVIDIA NIM embeddings by passing ``model_name="nvidia-nim"`` or
+    ``"nvidia-nim:<model>"`` (or setting ``ENGRAPHIS_EMBED_PROVIDER=nvidia-nim``).
+    Opt into CUDA acceleration for local sentence-transformers models via
+    ``device="auto"`` / ``"cuda"`` / ``"cpu"`` or ``ENGRAPHIS_EMBED_DEVICE``.
+
     Args:
         require_exact: When True, raise an error if the configured model is unavailable
             instead of falling back to the deterministic embedder.
     """
     global LAST_EMBEDDER_ERROR
-    if model_name:
-        raw_model_name = str(model_name).strip()
+    raw_model_name = str(model_name).strip() if model_name else ""
+    api_provider, api_model_name = _select_api_provider(raw_model_name, provider)
+    if api_provider:
+        if immutable_models_required(require_immutable_models) and not str(revision or "").strip():
+            raise ValueError(
+                f"{api_provider} embedder requires a non-empty ENGRAPHIS_EMBED_REVISION "
+                "(space_version) when ENGRAPHIS_REQUIRE_IMMUTABLE_MODELS=1"
+            )
+        from engraphis.backends.embedder_api import (
+            create_api_embedder,
+            create_nvidia_nim_embedder,
+        )
+
+        api_dim = _configured_api_dim()
+        try:
+            if api_provider == "nvidia-nim":
+                emb = create_nvidia_nim_embedder(
+                    api_model_name or None,
+                    base_url=base_url,
+                    api_key=api_key,
+                    dim=api_dim,
+                    space_version=revision,
+                )
+            else:
+                emb = create_api_embedder(
+                    api_model_name,
+                    base_url=base_url,
+                    api_key=api_key,
+                    dim=api_dim,
+                    space_version=revision,
+                )
+            LAST_EMBEDDER_ERROR = ""
+            return emb
+        except ValueError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - optional/unconfigured provider fallback
+            error_kind = type(exc).__name__
+            LAST_EMBEDDER_ERROR = error_kind
+            label = "NVIDIA NIM" if api_provider == "nvidia-nim" else "API"
+            if require_exact:
+                hint = (
+                    "; set NVIDIA_API_KEY or ENGRAPHIS_EMBED_API_KEY, or point "
+                    "ENGRAPHIS_EMBED_BASE_URL to a local self-hosted NIM endpoint"
+                    if api_provider == "nvidia-nim"
+                    else "; set ENGRAPHIS_EMBED_API_KEY or ENGRAPHIS_LLM_API_KEY"
+                )
+                raise RuntimeError(
+                    f"Configured {label} embedder is unavailable ({error_kind}) "
+                    f"and require_exact_backends=True prevents fallback to deterministic mode"
+                    f"{hint}"
+                ) from None
+            logging.getLogger("engraphis").warning(
+                "Configured %s embedder unavailable (%s); using the %d-dim deterministic "
+                "embedder; semantic recall/why/timeline will not match stored vectors.",
+                label, error_kind, dim,
+            )
+            return DeterministicEmbedder(
+                dim,
+                semantic_support_reason=(
+                    f"requested {label} embedding backend is unavailable; deterministic "
+                    "feature hashing captures lexical overlap only, so semantic vector "
+                    "retrieval and semantic grounding are disabled"
+                ),
+            )
+
+    if raw_model_name:
         validate_model_source(
             raw_model_name,
             revision,
             require_immutable_models=require_immutable_models,
             loader="sentence-transformers model",
         )
+        resolved_device = resolve_embed_device(device, require_exact=require_exact)
         has_local_prefix = raw_model_name.startswith(LOCAL_MODEL_PREFIX)
         local_files_only = has_local_prefix or is_local_model_source(raw_model_name)
         resolved_model_name = (
@@ -324,6 +526,8 @@ def get_embedder(
                 "revision": revision,
                 "require_immutable_models": require_immutable_models,
             }
+            if resolved_device is not None:
+                factory_kwargs["device"] = resolved_device
             if local_files_only:
                 factory_kwargs["local_files_only"] = True
             else:
